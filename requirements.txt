@@ -3,7 +3,7 @@ uvicorn
 requests
 pydantic
 numpy
-faiss-gpu
+faiss-cpu
 langchain
 langchain-community
 langchain-ollama

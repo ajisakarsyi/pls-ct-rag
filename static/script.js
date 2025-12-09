@@ -161,7 +161,7 @@ document.addEventListener("DOMContentLoaded", () => {
           cognitive, // dikonsumsi oleh backend kognitif
           cq1,
           cq2,
-          mode,
+          mode, // BARU
           // session_id bisa ditambah kalau mau multi-user
         }),
       });
@@ -173,13 +173,21 @@ document.addEventListener("DOMContentLoaded", () => {
       // cognitive_main, cq1_main, cq2_main, cognitive_compare, cq1_compare, cq2_compare
       const mainHeader = `GPT-OSS (${data.cognitive_main} | CQ: ${data.cq1_main}, ${data.cq2_main})`;
       const compareHeader = `Perbandingan (${data.cognitive_compare} | CQ: ${data.cq1_compare}, ${data.cq2_compare})`;
-      const ragInfo = data.use_rag
-        ? `RAG ${data.rag_mode || "simple"}`
-        : "RAG tidak digunakan (jawaban dari pengetahuan model)";
+      
+      // Menggunakan data.rag_mode yang dikirim backend
+      const ragInfo = data.used_rag 
+        ? `RAG aktif (${data.rag_mode || "simple"})` 
+        : `RAG ${data.rag_mode || "nonaktif"} (jawaban dari pengetahuan model)`;
 
+
+      // ===================================================
+      // ⚠️ PERBAIKAN BUG TypeError: escapeHtml(...) is not a function
+      // Menggabungkan string dengan benar
+      // ===================================================
       appendBubble(
         "bot",
-        `<div class ="rag-meta">${escapeHtml(ragInfo)}</div>`
+        // Menggabungkan string RAG info, header, dan konten jawaban
+        `<div class ="rag-meta">${escapeHtml(ragInfo)}</div>` + 
         `<b>${escapeHtml(mainHeader)}:</b><br>${renderMarkdown(
           data.reply_main || ""
         )}`
@@ -191,6 +199,7 @@ document.addEventListener("DOMContentLoaded", () => {
           data.reply_compare || ""
         )}`
       );
+      // ===================================================
 
       renderFollowupQuestion({ text: data.followup_question || "" });
 

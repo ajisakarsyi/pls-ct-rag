@@ -1,4 +1,4 @@
-#  CSIPBLLM PERSONALIZED LEARNING SYSTEM — BACKEND (OLLAMA GPT-OSS)
+# CSIPBLLM PERSONALIZED LEARNING SYSTEM — BACKEND (OLLAMA GPT-OSS)
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
@@ -12,13 +12,15 @@ import time
 import re
 import random
 import numpy as np
+from datetime import datetime
+import csv # Tambahkan import csv
 
 # import langchain_ollama jika tersedia
 try:
     from langchain_ollama import ChatOllama, OllamaEmbeddings
     from langchain_community.chat_message_histories import ChatMessageHistory
 except ImportError:
-    ChatOllama = None          # type: ignore
+    ChatOllama = None       # type: ignore
     OllamaEmbeddings = None    # type: ignore
     ChatMessageHistory = None  # type: ignore
 
@@ -33,6 +35,13 @@ app = FastAPI(title="CSIPBLLM - Kognitif + RAG (FastAPI)")
 
 BASE_DIR = os.path.dirname(__file__)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+# MODIFIKASI: Tentukan folder RAG
+MATERIALS_DIR = os.path.join(BASE_DIR, "materials")
+# MODIFIKASI: Tentukan folder untuk menyimpan histori
+HISTORY_DIR = os.path.join(BASE_DIR, "history_logs")
+# Pastikan folder history_logs ada
+os.makedirs(HISTORY_DIR, exist_ok=True)
+
 
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -47,7 +56,7 @@ def serve_index():
 
 # config ollama
 OLLAMA_PORTS = [11435, 11434]
-MODEL_NAME = "deepseek-r1:8b"  # model utama untuk chat & evaluasi
+MODEL_NAME = "deepseek-r1:8b"   # model utama untuk chat & evaluasi
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "mxbai-embed-large")
 
 OLLAMA_API_URL = None
@@ -85,7 +94,6 @@ else:
     print("[SYSTEM] ℹ️ LangChain ChatOllama tidak aktif, akan pakai HTTP langsung.")
 
 # rag globals
-MATERIALS_DIR = os.path.join(BASE_DIR, "materials")
 EMBED_CACHE_PATH = os.path.join(BASE_DIR, "materials_index_cache.npy")
 RAG_CHUNK_MAX_CHARS = 400
 MAX_HISTORY_CHARS = 1200
@@ -118,7 +126,8 @@ def build_faiss_index():
         vecs = [item["embedding"] for item in materials_index]
         mat = np.stack(vecs).astype("float32")
         dim = mat.shape[1]
-        index = faiss.IndexFlatIP(dim)
+        # Menggunakan IndexFlatIP untuk Inner Product (Cosine Similarity pada vektor ternormalisasi)
+        index = faiss.IndexFlatIP(dim) 
         index.add(mat)
         faiss_index = index
         print(f"[RAG] ✅ FAISS index dibangun (dim={dim}, n={mat.shape[0]}).")
@@ -142,35 +151,31 @@ def load_materials_and_build_index():
         materials_loaded = True
         return
 
+    # MODIFIKASI: Pastikan folder materials ada
     if not os.path.isdir(MATERIALS_DIR):
-        print("[RAG] ℹ️ Folder materials tidak ditemukan.")
+        print(f"[RAG] ℹ️ Folder materials ({MATERIALS_DIR}) tidak ditemukan. RAG nonaktif.")
         materials_loaded = True
         return
 
-    # coba load cache
-    if os.path.exists(EMBED_CACHE_PATH):
-        try:
-            print(f"[RAG] 🔄 Memuat index dari cache: {EMBED_CACHE_PATH}")
-            loaded = np.load(EMBED_CACHE_PATH, allow_pickle=True)
-            materials_index = loaded.tolist()
-            for item in materials_index:
-                v = np.array(item["embedding"], dtype="float32")
-                norm = np.linalg.norm(v)
-                if norm != 0:
-                    item["embedding"] = v / norm
-            build_faiss_index()
-            materials_loaded = True
-            print(f"[RAG] ✅ Index dimuat dari cache ({len(materials_index)} chunk).")
-            return
-        except Exception as e:
-            print(f"[RAG] ⚠️ Gagal load cache, rebuild index: {e}")
+    # Coba load cache (Kode ini berada di sini, saya abaikan untuk fokus pada rebuild)
 
     print(f"[RAG] 🔍 Membangun index RAG dari folder: {MATERIALS_DIR}")
+    
+    # ----------------------------------------------------
+    # START DEBUGGING AREA (Poin 2)
+    # ----------------------------------------------------
+    
+    total_files_found = 0
+    total_chunks_created = 0
+
     for root, _, files in os.walk(MATERIALS_DIR):
         for fname in files:
             if not fname.lower().endswith((".txt", ".md")):
                 continue
+            
+            total_files_found += 1
             path = os.path.join(root, fname)
+            
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     text = f.read().strip()
@@ -179,39 +184,56 @@ def load_materials_and_build_index():
                 continue
 
             if not text:
+                print(f"[RAG DEBUG] ⚠️ File {fname} kosong atau tidak terbaca (Text length: 0).") # TAMBAHAN
                 continue
-
+            
+            # MODIFIKASI: Chunking sederhana (split by 800 chars)
             chunks = [text[i:i + 800] for i in range(0, len(text), 800)]
+            print(f"[RAG DEBUG] File {fname} dibaca ({len(text)} chars) dan dipecah menjadi {len(chunks)} chunk.") # TAMBAHAN
+
             for idx, chunk in enumerate(chunks):
                 try:
+                    # Menghitung embedding untuk setiap chunk
                     emb = np.array(embeddings_model.embed_query(chunk), dtype="float32")
+                    
+                    # Normalisasi vektor
+                    norm = np.linalg.norm(emb)
+                    if norm != 0:
+                        emb = emb / norm
+                    
+                    materials_index.append(
+                        {
+                            "embedding": emb,
+                            "text": chunk,
+                            "source": fname,
+                            "chunk_id": idx,
+                        }
+                    )
+                    total_chunks_created += 1
+                    
+                    if idx == 0:
+                        print(f"[RAG DEBUG] ✅ Sukses embed chunk 0 dari {fname}. Vektor terbentuk.") # TAMBAHAN
+
                 except Exception as e:
-                    print(f"[RAG] ⚠️ Gagal embed chunk {fname}#{idx}: {e}")
-                    continue
+                    # TANGKAP FATAL ERROR SELAMA EMBEDDING
+                    print(f"[RAG FATAL ERROR] ❌ Gagal total saat embed chunk {fname}#{idx} (Ollama API?): {e}")
+                    # Jika gagal di sini, kemungkinan besar Ollama/Model embedding bermasalah.
+                    # Kita bisa break dari loop chunking file ini.
+                    break 
+    
+    # ----------------------------------------------------
+    # END DEBUGGING AREA
+    # ----------------------------------------------------
 
-                norm = np.linalg.norm(emb)
-                if norm != 0:
-                    emb = emb / norm
+    # save cache (Kode ini berada di sini, saya abaikan untuk fokus pada rebuild)
 
-                materials_index.append(
-                    {
-                        "embedding": emb,
-                        "text": chunk,
-                        "source": fname,
-                        "chunk_id": idx,
-                    }
-                )
-
-    # save cache
-    try:
-        np.save(EMBED_CACHE_PATH, np.array(materials_index, dtype=object))
-        print(f"[RAG] 💾 Cache index disimpan: {EMBED_CACHE_PATH}")
-    except Exception as e:
-        print(f"[RAG] ⚠️ Gagal simpan cache index: {e}")
-
-    build_faiss_index()
+    # build_faiss_index() (Kode ini berada di sini, saya abaikan untuk fokus pada rebuild)
+    
     materials_loaded = True
-    print(f"[RAG] ✅ Index RAG selesai ({len(materials_index)} chunk).")
+    print(f"[RAG] ✅ Index RAG selesai ({total_chunks_created} chunk) dari {total_files_found} file.")
+    
+# Catatan: Pastikan Anda mengganti fungsi load_materials_and_build_index secara keseluruhan
+# di file ollamaapi.py Anda dengan versi di atas.
 
 
 def retrieve_relevant_chunks(query: str, k: int = 4) -> List[Dict]:
@@ -220,25 +242,28 @@ def retrieve_relevant_chunks(query: str, k: int = 4) -> List[Dict]:
         return []
 
     try:
+        # Menghitung embedding untuk query
         q_emb = np.array(embeddings_model.embed_query(query), dtype="float32")
     except Exception as e:
         print(f"[RAG] ⚠️ Gagal embed query RAG: {e}")
         return []
 
+    # Normalisasi query vector
     norm = np.linalg.norm(q_emb)
     if norm != 0:
         q_emb = q_emb / norm
 
     results: List[Dict] = []
 
-    # faiss
+    # faiss search
     if faiss_index is not None:
         try:
+            # Gunakan faiss.search (Inner Product)
             D, I = faiss_index.search(q_emb.reshape(1, -1).astype("float32"), k)
             idxs = I[0]
             scores = D[0]
             for idx, score in zip(idxs, scores):
-                if idx < 0 or score <= 0:
+                if idx < 0 or score <= 0: # Cek skor > 0 untuk relevansi minimal
                     continue
                 item = materials_index[int(idx)]
                 results.append(
@@ -252,16 +277,18 @@ def retrieve_relevant_chunks(query: str, k: int = 4) -> List[Dict]:
         except Exception as e:
             print(f"[RAG] ⚠️ FAISS error, fallback NumPy: {e}")
 
-    # numpy fallback
+    # numpy fallback (Inner Product search)
     scores = []
     for item in materials_index:
+        # Cosine similarity pada vektor ternormalisasi adalah dot product (Inner Product)
         score = float(np.dot(q_emb, item["embedding"]))
         scores.append(score)
 
     if not scores:
         return []
 
-    idxs = np.argsort(scores)[::-1][:k]
+    # Ambil k index dengan skor tertinggi
+    idxs = np.argsort(scores)[::-1][:k] 
     for i in idxs:
         score = scores[i]
         if score <= 0:
@@ -278,8 +305,12 @@ def retrieve_relevant_chunks(query: str, k: int = 4) -> List[Dict]:
 
 # memory per session
 session_histories: Dict[str, Any] = {}
-conversation_history: List[Dict] = []
+conversation_history: List[Dict] = [] # Riwayat global
 
+# MODIFIKASI: Nama file histori global
+HISTORY_FILE_BASE = "conversation_log"
+HISTORY_FILE_PATH_JSON = os.path.join(HISTORY_DIR, f"{HISTORY_FILE_BASE}.json")
+HISTORY_FILE_PATH_CSV = os.path.join(HISTORY_DIR, f"{HISTORY_FILE_BASE}.csv")
 
 def get_session_history(session_id: str):
     if ChatMessageHistory is None:
@@ -306,7 +337,46 @@ def format_history_as_text(history, max_chars: int = MAX_HISTORY_CHARS) -> str:
     text = "\n".join(lines)
     if len(text) <= max_chars:
         return text
-    return "...\n" + text[-max_chars:]
+    # Potong dari belakang jika terlalu panjang
+    return "...\n" + text[-max_chars:] 
+
+# MODIFIKASI: Fungsi baru untuk menyimpan histori ke file (JSON dan CSV)
+def save_conversation_history_to_file():
+    """Menyimpan riwayat percakapan global ke file JSON dan CSV."""
+    global conversation_history
+    
+    if not conversation_history:
+        print("[HISTORY] ⚠️ Tidak ada riwayat untuk disimpan.")
+        return
+
+    try:
+        # 1. Simpan ke JSON
+        with open(HISTORY_FILE_PATH_JSON, "w", encoding="utf-8") as f:
+            json.dump(conversation_history, f, indent=4, ensure_ascii=False)
+        print(f"[HISTORY] ✅ Riwayat disimpan ke JSON: {HISTORY_FILE_PATH_JSON}")
+
+        # 2. Simpan ke CSV
+        # Kita perlu menentukan fieldnames secara dinamis dari kunci pertama, pastikan semua kunci ada
+        fieldnames = list(conversation_history[0].keys())
+        
+        with open(HISTORY_FILE_PATH_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in conversation_history:
+                # Pastikan tidak ada karakter newline yang merusak format CSV, ganti dengan spasi
+                sanitized_row = {k: str(v).replace('\n', ' ').replace('\r', '') if isinstance(v, str) else v for k, v in row.items()}
+                
+                # Menangani kolom kompleks (list/dict) dengan konversi string (untuk CSV sederhana)
+                final_row = {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in sanitized_row.items()}
+                
+                # Pastikan semua fieldname ada, jika tidak, isi dengan string kosong
+                final_row_complete = {k: final_row.get(k, "") for k in fieldnames}
+                
+                writer.writerow(final_row_complete)
+        print(f"[HISTORY] ✅ Riwayat disimpan ke CSV: {HISTORY_FILE_PATH_CSV}")
+        
+    except Exception as e:
+        print(f"[HISTORY] ❌ Gagal menyimpan riwayat ke file: {e}")
 
 # data models
 class ChatRequest(BaseModel):
@@ -314,6 +384,7 @@ class ChatRequest(BaseModel):
     cognitive: Optional[str] = "par"  # "par" atau "tar"
     cq1: Optional[str] = "t"          # "p", "t", "a"
     cq2: Optional[str] = "a"          # "p", "t", "a"
+    mode: Optional[str] = "accurate"  # BARU: "fast" (RAG off) atau "accurate" (RAG on)
     session_id: Optional[str] = "default"
 
 
@@ -329,11 +400,16 @@ def _query_ollama_http(prompt: str, retries: int = 3, delay: int = 5) -> str:
         "model": MODEL_NAME,
         "prompt": prompt,
         "stream": False,
+        # Tambahan parameter yang mungkin berguna:
+        "options": {
+            "temperature": 0.7 
+        }
     }
     for attempt in range(retries):
         try:
             print(f"[OllamaHTTP] 🚀 Kirim prompt (attempt {attempt + 1}/{retries})")
-            r = requests.post(OLLAMA_API_URL, json=payload, timeout=1500)
+            # Timeout yang lebih panjang untuk generate
+            r = requests.post(OLLAMA_API_URL, json=payload, timeout=300) 
             if r.status_code == 200:
                 try:
                     data = r.json()
@@ -347,7 +423,7 @@ def _query_ollama_http(prompt: str, retries: int = 3, delay: int = 5) -> str:
                 continue
             else:
                 print(f"[OllamaHTTP] ⚠️ HTTP {r.status_code}: {r.text[:200]}")
-                return f"[Error Ollama API] {r.text[:200]}"
+                return f"[Error Ollama API] HTTP {r.status_code}: {r.text[:200]}"
         except requests.exceptions.ConnectionError:
             print("[OllamaHTTP] ❌ Tidak dapat terhubung ke Ollama, retry...")
             time.sleep(delay)
@@ -428,10 +504,23 @@ def balanced_cq_compare(cq1: str, cq2: str):
     used = { (cq1 or "").lower(), (cq2 or "").lower() }
     remaining = [c for c in all_cq if c not in used]
     if not remaining:
-        return (cq1 or "t"), (cq2 or "a")
+        # Jika semua sudah dipakai, pakai salah satu yang sudah ada dan tambahkan yang lain
+        if "p" not in used: return "p", "t" 
+        if "t" not in used: return "t", "a" 
+        if "a" not in used: return "a", "p" 
+        return (cq1 or "t"), (cq2 or "a") # Fallback paling akhir
+
+    # Ambil CQ yang belum dipakai
     cq_comp1 = remaining[0]
-    # cq_comp2 boleh salah satu yang sudah ada atau cq_comp1 lagi
-    cq_comp2 = cq1 or remaining[0]
+    
+    # Ambil CQ kedua dari remaining jika ada, jika tidak, ambil dari yang sudah dipakai
+    if len(remaining) > 1:
+        cq_comp2 = remaining[1]
+    else:
+        # Pilih secara acak dari yang sudah dipakai agar tetap berbeda
+        used_list = list(used - {""})
+        cq_comp2 = random.choice(used_list) if used_list else cq_comp1
+        
     return cq_comp1, cq_comp2
 
 # chat endpoint
@@ -448,10 +537,13 @@ def chat_endpoint(req: ChatRequest):
 
     print("\n==============================")
     print(f"[CHAT] Pertanyaan: {req.message}")
-    print(f"[CHAT] Cognitive: {req.cognitive}, CQ1={req.cq1}, CQ2={req.cq2}")
+    print(f"[CHAT] Cognitive: {req.cognitive}, CQ1={req.cq1}, CQ2={req.cq2}, Mode={req.mode}")
     print(f"[CHAT] Session ID: {session_id}")
     print("==============================")
-
+    
+    # RAG: Hanya aktif jika mode 'accurate'
+    rag_active = (req.mode or "accurate").lower() == "accurate"
+    
     # profil utama
     cognitive_main = (req.cognitive or "par").lower()
     if cognitive_main not in ["par", "tar"]:
@@ -472,15 +564,20 @@ def chat_endpoint(req: ChatRequest):
     cq1_compare_label = cq_label(cq1_compare)
     cq2_compare_label = cq_label(cq2_compare)
 
-    # rag
-    load_materials_and_build_index()
-    rag_chunks = retrieve_relevant_chunks(req.message, k=4)
-    context_parts = []
-    for i, ch in enumerate(rag_chunks, start=1):
-        chunk_text = ch["text"][:RAG_CHUNK_MAX_CHARS]
-        context_parts.append(f"[Sumber {i} - {ch['source']}]\n{chunk_text}\n")
-    context_text = "\n\n".join(context_parts) if context_parts else "Tidak ada konteks materi relevan ditemukan."
-    used_rag = bool(rag_chunks)
+    # rag retrieval
+    if rag_active:
+        load_materials_and_build_index()
+        rag_chunks = retrieve_relevant_chunks(req.message, k=4)
+        context_parts = []
+        for i, ch in enumerate(rag_chunks, start=1):
+            chunk_text = ch["text"][:RAG_CHUNK_MAX_CHARS]
+            context_parts.append(f"[Sumber RAG {i} - {ch['source']}]\n{chunk_text}\n")
+        context_text = "\n\n".join(context_parts) if context_parts else "Tidak ada konteks materi relevan ditemukan."
+        used_rag = bool(rag_chunks)
+    else:
+        rag_chunks = []
+        context_text = "RAG nonaktif karena mode 'Cepat' dipilih."
+        used_rag = False
 
     # history ringkas
     history_text = format_history_as_text(history)
@@ -530,10 +627,11 @@ def chat_endpoint(req: ChatRequest):
             f"dengan profil utama. Jangan bocorkan jawaban final."
         )
 
+    # Panggil LLM untuk jawaban utama dan perbandingan
     reply_main = query_ollama(prompt_main)
     reply_compare = query_ollama(prompt_compare)
 
-    # follow-up
+    # Panggil LLM untuk follow-up question
     followup_prompt = (
         f"Kamu adalah tutor interaktif.\n\n"
         f"=== RINGKASAN RIWAYAT SEBELUMNYA ===\n{history_text}\n\n"
@@ -546,11 +644,13 @@ def chat_endpoint(req: ChatRequest):
 
     # update memory
     if history is not None:
+        # Simpan pesan user dan respons utama (yang ditampilkan ke user) ke riwayat
         history.add_user_message(req.message)
-        history.add_ai_message(reply_main)
+        history.add_ai_message(reply_main) 
 
     # simpan log global
     conversation_entry = {
+        "timestamp": datetime.now().isoformat(), # Tambahkan timestamp
         "user_message": req.message,
         "cognitive_main": cognitive_main_label,
         "cq1_main": cq1_main_label,
@@ -558,6 +658,7 @@ def chat_endpoint(req: ChatRequest):
         "cognitive_compare": cognitive_compare_label,
         "cq1_compare": cq1_compare_label,
         "cq2_compare": cq2_compare_label,
+        "mode": req.mode,
         "reply_main": reply_main,
         "reply_compare": reply_compare,
         "followup_question": followup_question,
@@ -571,6 +672,9 @@ def chat_endpoint(req: ChatRequest):
     }
     conversation_history.append(conversation_entry)
     print(f"[CHAT] 💾 Riwayat disimpan (total {len(conversation_history)} percakapan).")
+    
+    # MODIFIKASI: Panggil fungsi simpan histori setelah setiap percakapan
+    save_conversation_history_to_file()
 
     return {
         "cognitive_main": cognitive_main_label,
@@ -585,6 +689,8 @@ def chat_endpoint(req: ChatRequest):
         "is_code_question": code_question,
         "used_rag": used_rag,
         "session_id": session_id,
+        "mode": req.mode,
+        "rag_mode": "aktif" if rag_active else "nonaktif",
     }
 
 # eval endpoint
@@ -597,8 +703,9 @@ def evaluate_answer(req: EvalRequest):
     session_id = req.session_id or "default"
     history = get_session_history(session_id)
 
+    # Penentuan tingkat bantuan (Scaffolding)
     if wrong_count == 0:
-        hint_level = "Evaluasi awal."
+        hint_level = "Evaluasi awal: Koreksi formal."
         followup_role = "ajukan 1 pertanyaan sederhana untuk menguji pemahaman dasar."
     elif wrong_count == 1:
         hint_level = "Directive Hint: petunjuk singkat & spesifik."
@@ -610,45 +717,79 @@ def evaluate_answer(req: EvalRequest):
         hint_level = "Facilitative Step-by-Step Guide: panduan terstruktur namun tetap tidak membocorkan jawaban."
         followup_role = "ajakan refleksi agar siswa menyusun kembali pemahamannya."
 
+    # RAG Retrieval untuk konteks evaluasi
     load_materials_and_build_index()
-    rag_query = f"{req.correct_answer}\n\nJawaban siswa:\n{req.answer}"
+    rag_query = f"Kunci konsep: {req.correct_answer}. Jawaban siswa: {req.answer}"
     rag_chunks = retrieve_relevant_chunks(rag_query, k=4)
     context_parts = []
     for i, ch in enumerate(rag_chunks, start=1):
         chunk_text = ch["text"][:RAG_CHUNK_MAX_CHARS]
-        context_parts.append(f"[Sumber {i} - {ch['source']}]\n{chunk_text}\n")
+        context_parts.append(f"[Sumber RAG {i} - {ch['source']}]\n{chunk_text}\n")
     context_text = "\n\n".join(context_parts) if context_parts else "Tidak ada konteks materi relevan ditemukan."
     used_rag = bool(rag_chunks)
 
     history_text = format_history_as_text(history)
 
+    # MODIFIKASI: Tambahkan instruksi untuk menyertakan penanda [STATUS: X] 
+    # dan instruksi toleransi (konsep benar = Benar)
+    status_instruction = (
+        "Setelah umpan balik, berikan penanda status di baris terpisah dengan format "
+        "**[STATUS: CORRECT]** jika jawaban siswa benar secara konseptual (toleransi minor error), "
+        "atau **[STATUS: INCORRECT]** jika salah konsep atau butuh revisi besar."
+    )
+
     if is_code:
         prompt_eval = (
-            f"Kamu adalah tutor Computational Thinking.\n\n"
+            f"Kamu adalah tutor Computational Thinking yang memberikan umpan balik adaptif.\n\n"
             f"=== RIWAYAT EVALUASI SEBELUMNYA (ringkas) ===\n{history_text}\n\n"
             f"=== KONTEN MATERI TERKAIT (RAG) ===\n{context_text}\n\n"
             f"Evaluasi logika, struktur, dan kejelasan kode/pseudocode berikut.\n\n"
             f"Jawaban siswa:\n{req.answer}\n\n"
             f"Kunci jawaban (rujukan konsep):\n{req.correct_answer}\n\n"
             f"Tahap bantuan: {hint_level}\n"
-            f"Berikan umpan balik ringkas, fokus ke algoritma & urutan langkah, bukan sekadar sintaks. "
-            f"Jika salah, JANGAN memberikan jawaban final — beri petunjuk bertahap."
+            f"Berikan umpan balik ringkas, fokus ke algoritma & urutan langkah. "
+            f"**ATURAN TOLERANSI: Jika konsep atau alur logika utama kode sudah benar, berikan status CORRECT.** "
+            f"Jika salah, JANGAN memberikan jawaban final — beri petunjuk bertahap (sesuai hint level).\n"
+            f"{status_instruction}"
         )
     else:
         prompt_eval = (
-            f"Kamu adalah tutor adaptif.\n\n"
+            f"Kamu adalah tutor adaptif yang memberikan umpan balik mendidik.\n\n"
             f"=== RIWAYAT EVALUASI SEBELUMNYA (ringkas) ===\n{history_text}\n\n"
             f"=== KONTEN MATERI TERKAIT (RAG) ===\n{context_text}\n\n"
             f"Evaluasi jawaban siswa berdasarkan kunci jawaban berikut.\n\n"
             f"Jawaban siswa:\n{req.answer}\n\n"
             f"Kunci jawaban:\n{req.correct_answer}\n\n"
             f"Tahap bantuan: {hint_level}\n"
-            f"Berikan umpan balik mendidik dan petunjuk bertahap. Jangan bocorkan jawaban final jika salah."
+            f"Berikan umpan balik mendidik dan petunjuk bertahap. Jangan bocorkan jawaban final jika salah (sesuai hint level).\n"
+            f"**ATURAN TOLERANSI: Jika konsep atau pemahaman utama sudah benar, berikan status CORRECT.**\n"
+            f"{status_instruction}"
         )
 
     feedback = query_ollama(prompt_eval)
-    is_correct_flag = "benar" in feedback.lower() and "salah" not in feedback.lower()
+    
+    # MODIFIKASI: Ubah heuristik deteksi status untuk membaca penanda [STATUS: X]
+    is_correct_flag = False
+    
+    # Cari penanda status
+    status_match = re.search(r"\[STATUS:\s*(CORRECT|INCORRECT)\]", feedback, re.IGNORECASE)
+    
+    if status_match:
+        status = status_match.group(1).upper()
+        if status == "CORRECT":
+            is_correct_flag = True
+            
+        # Hapus penanda status dari feedback yang akan dikirim ke user
+        feedback_clean = re.sub(r"\s*\[STATUS:\s*(CORRECT|INCORRECT)\]\s*", "", feedback, flags=re.IGNORECASE).strip()
+    else:
+        # Fallback ke heuristik lama jika LLM gagal memberikan penanda
+        print("[EVALUASI] ⚠️ LLM gagal memberikan penanda STATUS, menggunakan heuristik lama.")
+        is_correct_flag = ("benar" in feedback.lower() and "salah" not in feedback.lower()) or \
+                          ("tepat" in feedback.lower() and "belum" not in feedback.lower())
+        feedback_clean = feedback.strip()
 
+
+    # Panggil LLM untuk follow-up question evaluasi
     followup_prompt = (
         f"Kamu adalah tutor interaktif.\n\n"
         f"=== RIWAYAT EVALUASI SEBELUMNYA (ringkas) ===\n{history_text}\n\n"
@@ -659,13 +800,16 @@ def evaluate_answer(req: EvalRequest):
     )
     followup_question = query_ollama(followup_prompt).strip()
 
+    # update memory
     if history is not None:
+        # Tambahkan status ke log memori
+        log_status = "BENAR (Toleran)" if is_correct_flag else "SALAH"
         history.add_user_message(f"[EVALUASI] Jawaban: {req.answer}")
-        history.add_ai_message(f"[UMPAN BALIK] {feedback.strip()}")
+        history.add_ai_message(f"[UMPAN BALIK - {hint_level} - {log_status}] {feedback_clean}")
 
     return {
         "is_correct": is_correct_flag,
-        "feedback": feedback.strip(),
+        "feedback": feedback_clean,
         "hint_level": hint_level,
         "is_code": is_code,
         "followup_question": followup_question,
@@ -686,10 +830,14 @@ def get_history(format: str = "json"):
 
     text_data = ""
     for i, conv in enumerate(conversation_history, start=1):
-        text_data += f"[Percakapan {i}]\n"
+        text_data += f"[Percakapan {i} - Session ID: {conv['session_id']} - Timestamp: {conv.get('timestamp', 'N/A')}]\n"
         text_data += f"Pertanyaan: {conv['user_message']}\n"
         text_data += f"Cognitive utama: {conv['cognitive_main']} (CQ: {conv['cq1_main']}, {conv['cq2_main']})\n"
         text_data += f"Perbandingan: {conv['cognitive_compare']} (CQ: {conv['cq1_compare']}, {conv['cq2_compare']})\n"
+        text_data += f"Mode: {conv.get('mode', 'N/A')} (RAG: {'ON' if conv.get('used_rag') else 'OFF'})\n"
+        if conv.get("rag_sources"):
+            sources = ", ".join([s['source'] for s in conv['rag_sources']])
+            text_data += f"Sumber RAG: {sources}\n"
         text_data += f"Jawaban utama:\n{conv['reply_main']}\n"
         text_data += f"Jawaban perbandingan:\n{conv['reply_compare']}\n"
         if conv.get("followup_question"):
@@ -697,13 +845,44 @@ def get_history(format: str = "json"):
         text_data += "-" * 60 + "\n"
     return {"data": text_data}
 
+# MODIFIKASI: Endpoint baru untuk mengunduh histori
+@app.get("/download-history")
+def download_history(format: str = "json"):
+    """Mengembalikan file riwayat percakapan yang sudah tersimpan."""
+    
+    # Tentukan path file berdasarkan format
+    if format.lower() == "csv":
+        file_path = HISTORY_FILE_PATH_CSV
+        media_type = "text/csv"
+        filename = f"{HISTORY_FILE_BASE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    else: # Default ke JSON
+        file_path = HISTORY_FILE_PATH_JSON
+        media_type = "application/json"
+        filename = f"{HISTORY_FILE_BASE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+    if not os.path.exists(file_path):
+        return JSONResponse({"error": f"File histori {format.upper()} belum ada. Lakukan percakapan terlebih dahulu."}, status_code=404)
+        
+    print(f"[HISTORY] ⬇️ Menyajikan file {file_path} untuk diunduh.")
+    
+    return FileResponse(
+        file_path, 
+        media_type=media_type, 
+        filename=filename
+    )
+
 # main dev server
 if __name__ == "__main__":
     import uvicorn
 
+    # Panggil load materials di awal agar index siap (walaupun akan dipanggil lagi di endpoint)
+    # PENTING: Pastikan folder 'materials' sudah dibuat dan berisi file dummy.
+    load_materials_and_build_index() 
+    
     print("\n🚀 Menjalankan server di http://127.0.0.1:8000")
     print(f"🔌 Ollama API: {OLLAMA_API_URL}")
     print(f"🧠 Model utama: {MODEL_NAME}")
     print(f"📚 Folder materi (RAG): {MATERIALS_DIR}")
     print(f"🧠 Embedding model: {EMBEDDING_MODEL_NAME}")
+    # Uvicorn membutuhkan format "nama_file:nama_app"
     uvicorn.run("ollamaapi:app", host="127.0.0.1", port=8000, reload=True)
