@@ -36,9 +36,7 @@ Frontend can call: - `POST /chat` - `POST /evaluate`
 ```{=html}
 <!-- -->
 ```
-    pip install fastapi uvicorn requests numpy python-multipart
-    pip install langchain_ollama langchain-community
-    pip install faiss-cpu
+    pip install -r requirements.txt
 
 ------------------------------------------------------------------------
 
