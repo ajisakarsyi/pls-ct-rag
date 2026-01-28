@@ -57,7 +57,7 @@ Make sure Ollama is running.
 
 From the backend folder:
 
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn ollamaapi:app --reload --host 0.0.0.0 --port 8000
 
 Then open:
 
