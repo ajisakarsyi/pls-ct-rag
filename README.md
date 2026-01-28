@@ -23,6 +23,11 @@ Frontend can call: - `POST /chat` - `POST /evaluate`
 
 ## 🧩 2. Requirements
 
+```
+python -m venv path/to/venv/
+venv\Scripts\activate
+```
+
 ### You need:
 
 -   **Python 3.10+**
