@@ -24,7 +24,7 @@ Frontend can call: - `POST /chat` - `POST /evaluate`
 ## 🧩 2. Requirements
 
 ```
-python -m venv path/to/venv/
+python -m venv venv
 venv\Scripts\activate
 ```
 
